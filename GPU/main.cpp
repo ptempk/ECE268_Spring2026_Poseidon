@@ -36,14 +36,14 @@ void load_parameters(const std::string& filename) {
         }
     }
     // Safely route the copy through the nvcc-compiled wrapper
-    std::cout << "--- Vector Verification ---" << std::endl;
+    /*std::cout << "--- Vector Verification ---" << std::endl;
     std::cout << "RC size: " << rc.size() << " elements." << std::endl;
     if (!rc.empty()) {
         std::cout << "First RC (limb 0): 0x" << std::hex << rc[0] << std::dec << std::endl;
         std::cout << "Second RC (limb 1): 0x" << std::hex << rc[1] << std::dec << std::endl;
         std::cout << "Third RC (limb 2): 0x" << std::hex << rc[2] << std::dec << std::endl;
         std::cout << "Fourth RC (limb 3): 0x" << std::hex << rc[3] << std::dec << std::endl;
-    }
+    }*/
 
     std::cout << "MDS size: " << mds.size() << " elements." << std::endl;
     if (!mds.empty()) {

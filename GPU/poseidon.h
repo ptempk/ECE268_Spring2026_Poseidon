@@ -11,6 +11,8 @@
 #define RP 56
 #define TOTAL_RC ((RF + RP) * T)
 
+#define MAX_PARALLEL_SPONGES 10
+
 struct uint256 {
     uint64_t limbs[4];
 };
