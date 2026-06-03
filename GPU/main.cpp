@@ -35,83 +35,126 @@ void load_parameters(const std::string& filename) {
             pos = end;
         }
     }
-    // Safely route the copy through the nvcc-compiled wrapper
-    /*std::cout << "--- Vector Verification ---" << std::endl;
-    std::cout << "RC size: " << rc.size() << " elements." << std::endl;
-    if (!rc.empty()) {
-        std::cout << "First RC (limb 0): 0x" << std::hex << rc[0] << std::dec << std::endl;
-        std::cout << "Second RC (limb 1): 0x" << std::hex << rc[1] << std::dec << std::endl;
-        std::cout << "Third RC (limb 2): 0x" << std::hex << rc[2] << std::dec << std::endl;
-        std::cout << "Fourth RC (limb 3): 0x" << std::hex << rc[3] << std::dec << std::endl;
-    }*/
-
-    std::cout << "MDS size: " << mds.size() << " elements." << std::endl;
-    if (!mds.empty()) {
-        std::cout << "First MDS (limb 0): 0x" << std::hex << mds[0] << std::dec << std::endl;
-    }
     load_constants_to_gpu(rc.data(), rc.size(), mds.data(), mds.size());
-    std::cout << "Constants loaded to GPU memory." << std::endl;
+    
 }
 
 int main() {
-    load_parameters("poseidon_params_n255_t3_alpha5_M128.txt");
+    load_parameters("montgomery_constants.txt");//("poseidon_params_n255_t3_alpha5_M128.txt");
 
-    // --- Read ../input.txt as raw bytes ---
-    std::ifstream input_file("../input.txt", std::ios::binary);
+    std::ifstream input_file("../input.txt");
     if (!input_file) {
         std::cerr << "Error: could not open ../input.txt" << std::endl;
         return 1;
     }
-    std::vector<uint8_t> h_in(
-        (std::istreambuf_iterator<char>(input_file)),
-        std::istreambuf_iterator<char>()
-    );
+
+    std::vector<uint8_t> h_all_data;
+    std::vector<int> h_offsets;
+    std::vector<int> h_lengths;
+    std::string line;
+
+    while (std::getline(input_file, line)) {
+        if (line.empty()) continue; 
+        
+        h_offsets.push_back((int)h_all_data.size());
+        h_lengths.push_back((int)line.size());
+        
+        // Append line bytes to the flat vector
+        for (char c : line) {
+            h_all_data.push_back(static_cast<uint8_t>(c));
+        }
+    }
     input_file.close();
 
-    int total_len = (int)h_in.size();
-    std::cout << "Read " << total_len << " bytes from ../input.txt" << std::endl;
-
-    if (total_len == 0) {
-        std::cerr << "Error: input.txt is empty." << std::endl;
+    int num_hashes = (int)h_offsets.size();
+    if (num_hashes == 0) {
+        std::cerr << "Error: No data found in input.txt" << std::endl;
         return 1;
     }
 
     // --- GPU setup ---
-    uint8_t  *d_in;
-    uint256  *d_out;
-    cudaMalloc(&d_in,  total_len);
-    cudaMalloc(&d_out, sizeof(uint256));
-    cudaMemcpy(d_in, h_in.data(), total_len, cudaMemcpyHostToDevice);
+    uint8_t *d_in;
+    int *d_offsets, *d_lengths;
+    uint256 *d_out;
 
-    // Single thread: one input, one hash
-    launch_poseidon_kernel(d_in, d_out, total_len);
+    // --- Performance Measurement Setup ---
+    cudaEvent_t start, stop, proctimestart, proctimestop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventCreate(&proctimestart);
+    cudaEventCreate(&proctimestop);
+
+    // Record the start event
+    cudaEventRecord(start);
+
+    cudaMalloc(&d_in, h_all_data.size());
+    cudaMalloc(&d_offsets, num_hashes * sizeof(int));
+    cudaMalloc(&d_lengths, num_hashes * sizeof(int));
+    cudaMalloc(&d_out, num_hashes * sizeof(uint256));
+
+    cudaMemcpy(d_in, h_all_data.data(), h_all_data.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_offsets, h_offsets.data(), num_hashes * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_lengths, h_lengths.data(), num_hashes * sizeof(int), cudaMemcpyHostToDevice);
+
+    cudaDeviceSynchronize();
+    cudaEventRecord(proctimestart);
+    // Launch with one block per hash
+    // We pass num_hashes to set the grid size
+    launch_poseidon_kernel(d_in, d_offsets, d_lengths, d_out, num_hashes);
+
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         std::cerr << "GPU Execution Error: " << cudaGetErrorString(err) << std::endl;
     }
 
-    // --- Copy result and print as hex ---
-    uint256 h_out;
-    cudaMemcpy(&h_out, d_out, sizeof(uint256), cudaMemcpyDeviceToHost);
-
-    // --- Print Input Bytes (h_in) ---
-    /*std::cout << "Input data (hex): ";
-    for (int i = 0; i < total_len; i++) {
-        std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)h_in[i];
-    }
-    std::cout << std::dec << "\n" << std::endl;*/
+    cudaEventRecord(proctimestop);
+    cudaEventSynchronize(proctimestop);
+    // --- Copy results back ---
+    std::vector<uint256> h_results(num_hashes);
+    cudaMemcpy(h_results.data(), d_out, num_hashes * sizeof(uint256), cudaMemcpyDeviceToHost);
     
-    std::cout << "Poseidon hash: 0x";
-    for (int i = 3; i >= 0; i--) {
-        // Print each 64-bit limb as 16 hex digits, big-endian
-        for (int b = 7; b >= 0; b--) {
-            uint8_t byte = (h_out.limbs[i] >> (b * 8)) & 0xff;
-            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)byte;
-        }
+    // Record the stop event
+    cudaEventRecord(stop);
+    
+    // Wait for the GPU to finish all work before calculating time
+    cudaEventSynchronize(stop);
+
+    float milliseconds = 0;
+    float procmilliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    cudaEventElapsedTime(&procmilliseconds, proctimestart, proctimestop);
+
+    // --- Cleanup Performance Events ---
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    cudaEventDestroy(proctimestart);
+    cudaEventDestroy(proctimestop);
+
+    // --- Output Results ---
+    std::cout << "\n------------------------------------" << std::endl;
+    std::cout << "Processed " << num_hashes << " hashes." << std::endl;
+    std::cout << "Total GPU Execution Time: " << milliseconds << " ms" << std::endl;
+    std::cout << "GPU operation Time: " << procmilliseconds << " ms" << std::endl;
+    if (num_hashes > 0) {
+        std::cout << "Average time per hash: " << (milliseconds / num_hashes) << " ms" << std::endl;
     }
-    std::cout << std::dec << std::endl;
+    std::cout << "------------------------------------\n" << std::endl;
+
+    // Print all hashes
+    for (int n = 0; n < num_hashes; n++) {
+        std::cout << "Line " << n << " hash: 0x";
+        for (int i = 3; i >= 0; i--) {
+            for (int b = 7; b >= 0; b--) {
+                uint8_t byte = (h_results[n].limbs[i] >> (b * 8)) & 0xff;
+                std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)byte;
+            }
+        }
+        std::cout << std::dec << std::endl;
+    }
 
     cudaFree(d_in);
+    cudaFree(d_offsets);
+    cudaFree(d_lengths);
     cudaFree(d_out);
     return 0;
 }

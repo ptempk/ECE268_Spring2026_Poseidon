@@ -27,8 +27,22 @@ __device__ __constant__ uint64_t P_LIMBS[4] = {
     0x73eda753299d7d48  // Limb 3
 };
 
+/*__device__ __constant__ uint64_t R2_MOD_P[4] = {
+    0x0000000100000001, // Limb 0
+    0xed017a15152862d2, // Limb 1
+    0x1116c459f032b49d, // Limb 2
+    0x0c0d294029050adc  // Limb 3
+};*/
+
+__device__ __constant__ uint64_t R2_MOD_P[4] = {
+    0xc999e990f3f29c6d, // Limb 0
+    0x2b6cedcb87925c23, // Limb 1
+    0x05d314967254398f, // Limb 2
+    0x0748d9d99f59ff11  // Limb 3
+};
+
 // Wrapper declarations
-void launch_poseidon_kernel(uint8_t* d_in, uint256* d_out, size_t total_len);
+void launch_poseidon_kernel(uint8_t* d_in, int* d_offsets, int* d_lengths, uint256* d_out, int num_hashes);
 void load_constants_to_gpu(const uint64_t* h_rc, size_t rc_bytes, const uint64_t* h_mds, size_t mds_bytes);
 
 // Function declarations so main.cu knows they exist
@@ -94,76 +108,11 @@ __device__ __forceinline__ uint256 mod_add(uint256 a, uint256 b) {
     return res;
 }
 
-/*__device__ __forceinline__ uint256 mod_mul(uint256 a, uint256 b) {
-    uint64_t t[8] = {0}; // 512-bit accumulator for (a * b)
-
-    // --- PHASE 1: 256x256 -> 512 bit Multiplication (Schoolbook) ---
-    for (int i = 0; i < 4; i++) {
-        uint64_t carry = 0;
-        for (int j = 0; j < 4; j++) {
-            unsigned __int128 prod = (unsigned __int128)a.limbs[i] * b.limbs[j] + t[i + j] + carry;
-            t[i + j] = (uint64_t)prod;
-            carry = (uint64_t)(prod >> 64);
-        }
-        t[i + 4] = carry;
-    }
-
-    // --- PHASE 2: Montgomery Reduction (CIOS Method) ---
-    // this reduces t mod P by zeroing out the lower 4 limbs
-    for (int i = 0; i < 4; i++) {
-        uint64_t m = t[i] * P_INV; // the multiplier to make t[i] zero
-        uint64_t carry = 0;
-        
-        for (int j = 0; j < 4; j++) {
-            unsigned __int128 prod = (unsigned __int128)m * P_LIMBS[j] + t[i + j] + carry;
-            t[i + j] = (uint64_t)prod; // this results in t[i] becoming 0 in the first iteration
-            carry = (uint64_t)(prod >> 64);
-        }
-        
-        // Propagate carry through the upper limbs of t
-        int k = i + 4;
-        while (carry > 0 && k < 8) {
-            unsigned __int128 sum = (unsigned __int128)t[k] + carry;
-            t[k] = (uint64_t)sum;
-            carry = (uint64_t)(sum >> 64);
-            k++;
-        }
-    }
-
-    // --- PHASE 3: Final Selection ---
-    // the result is stored in the upper 4 limbs of t
-    uint256 res;
-    res.limbs[0] = t[4];
-    res.limbs[1] = t[5];
-    res.limbs[2] = t[6];
-    res.limbs[3] = t[7];
-
-    // Final check: if res >= P, return res - P. 
-    bool geq = true;
-    for(int i = 3; i >= 0; i--) {
-        if(res.limbs[i] < P_LIMBS[i]) { geq = false; break; }
-        if(res.limbs[i] > P_LIMBS[i]) { geq = true; break; }
-    }
-
-    if (geq) {
-        unsigned char c = 0;
-        for(int i = 0; i < 4; i++) {
-            // Manual borrow-subtraction logic
-            uint64_t old = res.limbs[i];
-            res.limbs[i] -= (P_LIMBS[i] + c);
-            c = (old < (P_LIMBS[i] + c)) ? 1 : 0;
-        }
-    }
-
-    return res;
-}*/
-
-
 __device__ __forceinline__ uint256 slow_plain_reduction(uint64_t* t) {
     for (int i = 256; i >= 0; i--) {
         uint64_t shifted_P[8] = {0};
-        int limb_shift = i / 64;
-        int bit_shift  = i % 64;
+        int limb_shift = i>>6;//i / 64;
+        int bit_shift  = i&63;//i % 64;
 
         if (bit_shift == 0) {
             for (int j = 0; j < 4; j++) {
@@ -205,6 +154,56 @@ __device__ __forceinline__ uint256 slow_plain_reduction(uint64_t* t) {
     return res;
 }
 
+__device__ __forceinline__ uint256 to_montgomery(uint256 x) {
+    uint256 r2;
+    for(int i=0; i<4; i++) r2.limbs[i] = R2_MOD_P[i];
+    return mod_mul(x, r2);
+}
+
+__device__ __forceinline__ uint256 from_montgomery(uint256 x_bar) {
+    uint256 one = {1, 0, 0, 0};
+    return mod_mul(x_bar, one);
+}
+
+__device__ __forceinline__ uint256 montgomery_reduce(uint64_t* t) {
+    for (int i = 0; i < 4; i++) {
+        uint64_t m = t[i] * P_INV;
+        uint64_t carry = 0;
+        for (int j = 0; j < 4; j++) {
+            unsigned __int128 prod = (unsigned __int128)m * P_LIMBS[j] + t[i + j] + carry;
+            t[i + j] = (uint64_t)prod;
+            carry = (uint64_t)(prod >> 64);
+        }
+        
+        // Propagate the carry through the remaining upper limbs
+        for (int j = i + 4; j < 8; j++) {
+            unsigned __int128 sum = (unsigned __int128)t[j] + carry;
+            t[j] = (uint64_t)sum;
+            carry = (uint64_t)(sum >> 64);
+        }
+    }
+
+    // The result is now in the upper 4 limbs (t[4] to t[7])
+    uint256 res;
+    for (int i = 0; i < 4; i++) res.limbs[i] = t[i + 4];
+
+    // Final conditional subtraction: if res >= P, res -= P
+    bool geq = true;
+    for (int i = 3; i >= 0; i--) {
+        if (res.limbs[i] < P_LIMBS[i]) { geq = false; break; }
+        if (res.limbs[i] > P_LIMBS[i]) break;
+    }
+    if (geq) {
+        uint64_t borrow = 0;
+        for (int i = 0; i < 4; i++) {
+            uint64_t prev = res.limbs[i];
+            res.limbs[i] = prev - P_LIMBS[i] - borrow;
+            borrow = (prev < P_LIMBS[i] || (prev == P_LIMBS[i] && borrow)) ? 1 : 0;
+        }
+    }
+    return res;
+}
+
 __device__ __forceinline__ uint256 mod_mul(uint256 a, uint256 b) {
     uint64_t t[8] = {0};
 
@@ -223,7 +222,7 @@ __device__ __forceinline__ uint256 mod_mul(uint256 a, uint256 b) {
             t[i + 5] += (uint64_t)(sum >> 64);
     }
 
-    return slow_plain_reduction(t);
+    return montgomery_reduce(t); //slow_plain_reduction(t);
 }
 
 #endif

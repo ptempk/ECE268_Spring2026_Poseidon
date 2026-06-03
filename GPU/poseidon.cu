@@ -19,27 +19,9 @@ __device__ void sbox(uint256 &x) {
     uint256 x2 = mod_mul(x, x);
     uint256 x4 = mod_mul(x2, x2);
     x = mod_mul(x4, x);
-    //x = mod_mul(x, x);
 }
 
-/*__device__ void mix_layer(uint256* state) {
-    uint256 next[T];
-    for (int i = 0; i < T; i++) {
-        // Start with 0
-        next[i].limbs[0] = 0; next[i].limbs[1] = 0; 
-        next[i].limbs[2] = 0; next[i].limbs[3] = 0;
-
-        mod_mul[]
-        for (int j = 0; j < T; j++) {
-            uint256 mat_val = load_const_uint256(M_MATRIX, i * T + j);
-            uint256 term = mod_mul(state[j], mat_val);
-            next[i] = mod_add(next[i], term);
-        }
-    }
-    for (int i = 0; i < T; i++) state[i] = next[i];
-}*/
-
-__device__ void mix_layer/*_parallel*/(uint256* state) {
+__device__ void mix_layer(uint256* state) {
     int i = threadIdx.x;
     uint256 res;
     
@@ -100,95 +82,6 @@ __device__ void run_poseidon_permutation_parallel(uint256 state[T]) {
     }
 }
 
-/*__global__ void poseidon_sponge_kernel(uint8_t* d_input, uint256* d_output, int total_len) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    // (Optional: remove the printf once you've confirmed it's running)
-    //printf("Kernel Started!\n");
-    uint256 state[T];
-    for(int i=0; i<T; i++) { 
-        state[i].limbs[0]=0; state[i].limbs[1]=0; 
-        state[i].limbs[2]=0; state[i].limbs[3]=0; 
-    }
-
-    for (int i = 0; i < total_len; i += 62) {
-        int len1 = (i + 31 <= total_len) ? 31 : (total_len - i);
-        uint256 m1 = bytes_to_uint256(d_input + i, len1);
-        
-        uint256 m2 = {0,0,0,0};
-        if (i + 31 < total_len) {
-            int len2 = (i + 62 <= total_len) ? 31 : (total_len - (i + 31));
-            m2 = bytes_to_uint256(d_input + i + 31, len2);
-        }
-
-        state[1] = mod_add(state[1], m1);
-        state[2] = mod_add(state[2], m2);
-        
-        run_poseidon_permutation(state);
-    }
-    d_output[tid] = state[1];
-}*/
-
-__global__ void poseidon_sponge_kernel(uint8_t* d_input, uint256* d_output, int total_len) {
-    // 1. Define shared memory. 
-    // SPONGES_PER_BLOCK = blockDim.x / T
-    __shared__ uint256 shared_states[MAX_PARALLEL_SPONGES*T]; 
-
-    // 2. Identify which sponge this thread belongs to, and which element (i) it owns
-    int sponge_idx = threadIdx.x / T; 
-    int element_i  = threadIdx.x % T;
-    
-    // Global ID for the overall hash result
-    int global_sponge_id = (blockIdx.x * (blockDim.x / T)) + sponge_idx;
-    
-    // Pointer to this specific sponge's state in shared memory
-    uint256* state = &shared_states[sponge_idx * T];
-
-    // 3. Initialization (Parallelized: Each thread zeros out its own element_i)
-    if (element_i < T) {
-        state[element_i].limbs[0] = 0; state[element_i].limbs[1] = 0;
-        state[element_i].limbs[2] = 0; state[element_i].limbs[3] = 0;
-    }
-    __syncthreads();
-
-    // 4. Absorption Phase
-    for (int i = 0; i < total_len; i += 62) {
-        // We only need one thread per sponge to handle the data loading
-        if (element_i == 0) {
-            int len1 = (i + 31 <= total_len) ? 31 : (total_len - i);
-            uint256 m1 = bytes_to_uint256(d_input + i, len1); // Note: Adjust d_input offset for global_sponge_id if inputs vary
-            
-            uint256 m2 = {0,0,0,0};
-            if (i + 31 < total_len) {
-                int len2 = (i + 62 <= total_len) ? 31 : (total_len - (i + 31));
-                m2 = bytes_to_uint256(d_input + i + 31, len2);
-            }
-
-            state[1] = mod_add(state[1], m1);
-            state[2] = mod_add(state[2], m2);
-        }
-        
-        // Ensure the additions are finished before starting the permutation
-        __syncthreads();
-        
-        // 5. Run Permutation (Parallelized version of the function we discussed)
-        run_poseidon_permutation_parallel(state);
-        
-        // Permutation function already has a __syncthreads at the end
-    }
-
-    // 6. Output
-    if (element_i == 1) {
-        d_output[global_sponge_id] = state[1];
-    }
-}
-
-// Keep your existing wrapper functions (launch_poseidon_kernel and load_constants_to_gpu)
-
-// WRAPPER FUNCTIONS
-void launch_poseidon_kernel(uint8_t* d_in, uint256* d_out, size_t total_len) {
-    poseidon_sponge_kernel<<<1, 3>>>(d_in, d_out, (int)total_len);
-}
-
 
 void load_constants_to_gpu(const uint64_t* h_rc, size_t rc_count, const uint64_t* h_mds, size_t mds_count) {
     cudaError_t err;
@@ -203,4 +96,78 @@ void load_constants_to_gpu(const uint64_t* h_rc, size_t rc_count, const uint64_t
     if (err != cudaSuccess) {
         printf("MDS Copy Failed: %s (Expected %zu bytes)\n", cudaGetErrorString(err), mds_count * sizeof(uint64_t));
     }
+}
+
+__global__ void poseidon_sponge_kernel(uint8_t* d_input, int* d_offsets, int* d_lengths, uint256* d_output) {
+    // Each block gets its own private 'state' in shared memory
+    // Since each block only handles ONE hash, the size is exactly T.
+    __shared__ uint256 state[T];
+    
+    int hash_idx = blockIdx.x; // Block 0 handles Line 0, Block 1 handles Line 1...
+    int tid = threadIdx.x;     
+    
+    // Pointers to this block's specific input data
+    uint8_t* my_input = d_input + d_offsets[hash_idx];
+    int my_len = d_lengths[hash_idx];
+
+    // 1. Initialization (Parallel)
+    // Only the first T threads do work; others sit idle but stay in sync.
+    if (tid < T) {
+        state[tid].limbs[0] = 0; state[tid].limbs[1] = 0;
+        state[tid].limbs[2] = 0; state[tid].limbs[3] = 0;
+    }
+    
+    // Ensure the zero-initialization is finished
+    __syncthreads();
+
+    // 2. Absorption Phase
+    for (int i = 0; i < my_len; i += 62) {
+        // Only thread 0 loads the data into the state
+        if (tid == 0) {
+            int len1 = (i + 31 <= my_len) ? 31 : (my_len - i);
+            uint256 m1 = bytes_to_uint256(my_input + i, len1);
+            uint256 m2 = {0,0,0,0};
+
+            if (i + 31 < my_len) {
+                int len2 = (i + 62 <= my_len) ? 31 : (my_len - (i + 31));
+                m2 = bytes_to_uint256(my_input + i + 31, len2);
+            }
+
+            uint256 m1_mont, m2_mont;
+            m1 = to_montgomery(m1);
+            m2 = to_montgomery(m2);
+            state[1] = mod_add(state[1], m1);
+            state[2] = mod_add(state[2], m2);
+        }
+        
+        // Wait for thread 0 to finish the additions
+        __syncthreads();
+        
+        // 3. Run the Permutation
+        // This function uses threads 0, 1, and 2 in parallel for the mix layer.
+        run_poseidon_permutation_parallel(state); 
+        
+        // run_poseidon_permutation_parallel should have a __syncthreads() 
+        // at its very end to ensure it's ready for the next iteration.
+    }
+
+    // 4. Output result
+    // Usually state[1] is the designated output element for Poseidon T=3
+    if (tid == 1) {
+        state[1] = from_montgomery(state[1]);
+        d_output[hash_idx] = state[1];
+    }
+}
+
+void launch_poseidon_kernel(uint8_t* d_in, int* d_offsets, int* d_lengths, uint256* d_out, int num_hashes) {
+    // We launch 32 threads even though we only use 3.
+    // This aligns with the GPU's "Warp" size for better scheduling.
+    int threads_per_block = 3; 
+    
+    // Shared memory is only needed for ONE state array (T elements) per block.
+    size_t shared_mem_size = T * sizeof(uint256);
+
+    poseidon_sponge_kernel<<<num_hashes, threads_per_block>>>(
+        d_in, d_offsets, d_lengths, d_out
+    );
 }
