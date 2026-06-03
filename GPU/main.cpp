@@ -7,7 +7,6 @@
 #include <iomanip>
 #include "poseidon.h"
 
-// --- 6. HOST PARSER & MAIN ---
 
 void hex_to_limbs(std::string hex, uint64_t* limbs) {
     if (hex.substr(0, 2) == "0x") hex = hex.substr(2);
@@ -40,7 +39,7 @@ void load_parameters(const std::string& filename) {
 }
 
 int main() {
-    load_parameters("montgomery_constants.txt");//("poseidon_params_n255_t3_alpha5_M128.txt");
+    load_parameters("montgomery_constants.txt");
 
     std::ifstream input_file("../input.txt");
     if (!input_file) {
@@ -142,7 +141,7 @@ int main() {
 
     // Print all hashes
     for (int n = 0; n < num_hashes; n++) {
-        std::cout << "Line " << n << " hash: 0x";
+        std::cout << "Line " << n << " Final hash: 0x";
         for (int i = 3; i >= 0; i--) {
             for (int b = 7; b >= 0; b--) {
                 uint8_t byte = (h_results[n].limbs[i] >> (b * 8)) & 0xff;

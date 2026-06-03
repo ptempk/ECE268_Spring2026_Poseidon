@@ -17,7 +17,7 @@ def poseidon_full_round(state, current_round):
         # Step C: MixLayer (We will implement this next)
         state = mix_layer(state)
         
-        print(f"Completed Full Round {current_round}")
+        #print(f"Completed Full Round {current_round}")
         return state
     
 def poseidon_partial_round(state, current_round):
@@ -31,12 +31,12 @@ def poseidon_partial_round(state, current_round):
     # Step C: MixLayer (We will implement this next)
     state = mix_layer(state)
 
-    print(f"Completed Partial Round {current_round}")
+    #print(f"Completed Partial Round {current_round}")
     return state
 
 def poseidon_permutation(state):
     current_round = 0
-    print("  [Permutation] Running rounds on current state...")
+    #print("  [Permutation] Running rounds on current state...")
     for i in range(FULL_ROUNDS//2):
         state = poseidon_full_round(state, current_round)
         current_round += 1  

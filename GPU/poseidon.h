@@ -5,7 +5,6 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
-// --- 1. PARAMETERS & TYPES ---
 #define T 3
 #define RF 8
 #define RP 56
@@ -26,13 +25,6 @@ __device__ __constant__ uint64_t P_LIMBS[4] = {
     0x3339d80809a1d805, // Limb 2
     0x73eda753299d7d48  // Limb 3
 };
-
-/*__device__ __constant__ uint64_t R2_MOD_P[4] = {
-    0x0000000100000001, // Limb 0
-    0xed017a15152862d2, // Limb 1
-    0x1116c459f032b49d, // Limb 2
-    0x0c0d294029050adc  // Limb 3
-};*/
 
 __device__ __constant__ uint64_t R2_MOD_P[4] = {
     0xc999e990f3f29c6d, // Limb 0
@@ -67,7 +59,7 @@ __device__ __forceinline__ uint256 bytes_to_uint256(const uint8_t* b, int len) {
 __device__ __forceinline__ uint256 mod_add(uint256 a, uint256 b) {
     uint256 res;
 
-    // 1. Perform 256-bit addition in ONE block to protect the carry chain
+    //Perform 256-bit addition in ONE block to protect the carry chain
     unsigned long long carry;
     asm(
         "add.cc.u64    %0, %5, %9; \n\t"
@@ -80,7 +72,7 @@ __device__ __forceinline__ uint256 mod_add(uint256 a, uint256 b) {
           "l"(b.limbs[0]), "l"(b.limbs[1]), "l"(b.limbs[2]), "l"(b.limbs[3])
     );
 
-    // 2. Check if (res >= P) or if we had a carry
+    //Check if (res >= P) or if we had a carry
     bool overflow = (carry != 0);
     if (!overflow) {
         for (int i = 3; i >= 0; i--) {
@@ -93,7 +85,7 @@ __device__ __forceinline__ uint256 mod_add(uint256 a, uint256 b) {
         }
     }
 
-    // 3. Conditional Subtraction in ONE block
+    //Conditional Subtraction in ONE block
     if (overflow) {
         asm(
             "sub.cc.u64  %0, %0, %4;\n\t"
@@ -105,52 +97,6 @@ __device__ __forceinline__ uint256 mod_add(uint256 a, uint256 b) {
         );
     }
 
-    return res;
-}
-
-__device__ __forceinline__ uint256 slow_plain_reduction(uint64_t* t) {
-    for (int i = 256; i >= 0; i--) {
-        uint64_t shifted_P[8] = {0};
-        int limb_shift = i>>6;//i / 64;
-        int bit_shift  = i&63;//i % 64;
-
-        if (bit_shift == 0) {
-            for (int j = 0; j < 4; j++) {
-                if (j + limb_shift < 8) shifted_P[j + limb_shift] = P_LIMBS[j];
-            }
-        } else {
-            uint64_t carry = 0;
-            for (int j = 0; j < 4; j++) {
-                uint64_t lo = (P_LIMBS[j] << bit_shift) | carry;
-                carry = P_LIMBS[j] >> (64 - bit_shift);
-                if (j + limb_shift < 8)
-                    shifted_P[j + limb_shift] = lo;
-            }
-            if (4 + limb_shift < 8)
-                shifted_P[4 + limb_shift] = carry;
-        }
-
-        bool geq = true;
-        for (int j = 7; j >= 0; j--) {
-            if (t[j] < shifted_P[j]) { geq = false; break; }
-            if (t[j] > shifted_P[j]) break;
-        }
-
-        if (geq) {
-            uint64_t borrow = 0;
-            for (int j = 0; j < 8; j++) {
-                uint64_t t_val = t[j];
-                uint64_t s     = shifted_P[j];
-                uint64_t tmp   = t_val - borrow;
-                borrow  = (t_val < borrow) ? 1 : 0;
-                borrow += (tmp   < s)      ? 1 : 0;
-                t[j] = tmp - s;
-            }
-        }
-    }
-
-    uint256 res;
-    for (int i = 0; i < 4; i++) res.limbs[i] = t[i];
     return res;
 }
 
@@ -207,7 +153,7 @@ __device__ __forceinline__ uint256 montgomery_reduce(uint64_t* t) {
 __device__ __forceinline__ uint256 mod_mul(uint256 a, uint256 b) {
     uint64_t t[8] = {0};
 
-    // Schoolbook 256x256 -> 512-bit multiplication
+    //256x256 multiplication
     for (int i = 0; i < 4; i++) {
         uint64_t carry = 0;
         for (int j = 0; j < 4; j++) {
@@ -222,7 +168,7 @@ __device__ __forceinline__ uint256 mod_mul(uint256 a, uint256 b) {
             t[i + 5] += (uint64_t)(sum >> 64);
     }
 
-    return montgomery_reduce(t); //slow_plain_reduction(t);
+    return montgomery_reduce(t);
 }
 
 #endif
