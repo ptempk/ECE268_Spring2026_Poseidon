@@ -100,6 +100,11 @@ __device__ __forceinline__ uint256 mod_add(uint256 a, uint256 b) {
     return res;
 }
 
+// ---------------------------------------------------------------------------
+// Montgomery path (USE_MONTGOMERY defined at compile time)
+// ---------------------------------------------------------------------------
+#ifdef USE_MONTGOMERY
+
 __device__ __forceinline__ uint256 to_montgomery(uint256 x) {
     uint256 r2;
     for(int i=0; i<4; i++) r2.limbs[i] = R2_MOD_P[i];
@@ -120,20 +125,14 @@ __device__ __forceinline__ uint256 montgomery_reduce(uint64_t* t) {
             t[i + j] = (uint64_t)prod;
             carry = (uint64_t)(prod >> 64);
         }
-        
-        // Propagate the carry through the remaining upper limbs
         for (int j = i + 4; j < 8; j++) {
             unsigned __int128 sum = (unsigned __int128)t[j] + carry;
             t[j] = (uint64_t)sum;
             carry = (uint64_t)(sum >> 64);
         }
     }
-
-    // The result is now in the upper 4 limbs (t[4] to t[7])
     uint256 res;
     for (int i = 0; i < 4; i++) res.limbs[i] = t[i + 4];
-
-    // Final conditional subtraction: if res >= P, res -= P
     bool geq = true;
     for (int i = 3; i >= 0; i--) {
         if (res.limbs[i] < P_LIMBS[i]) { geq = false; break; }
@@ -152,8 +151,6 @@ __device__ __forceinline__ uint256 montgomery_reduce(uint64_t* t) {
 
 __device__ __forceinline__ uint256 mod_mul(uint256 a, uint256 b) {
     uint64_t t[8] = {0};
-
-    //256x256 multiplication
     for (int i = 0; i < 4; i++) {
         uint64_t carry = 0;
         for (int j = 0; j < 4; j++) {
@@ -161,14 +158,77 @@ __device__ __forceinline__ uint256 mod_mul(uint256 a, uint256 b) {
             t[i + j] = (uint64_t)prod;
             carry     = (uint64_t)(prod >> 64);
         }
-        // Accumulate carry into the next upper limb
         unsigned __int128 sum = (unsigned __int128)t[i + 4] + carry;
         t[i + 4] = (uint64_t)sum;
         if ((uint64_t)(sum >> 64) && (i + 5 < 8))
             t[i + 5] += (uint64_t)(sum >> 64);
     }
-
     return montgomery_reduce(t);
 }
 
-#endif
+#else
+// ---------------------------------------------------------------------------
+// Naive path: plain 256x256 multiply then binary long division modulo P.
+// Values are kept in standard (non-Montgomery) form.
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ uint256 naive_mod_512(uint64_t* t) {
+    // Binary long division: t (512-bit) % P (255-bit).
+    // For each shift from 255 down to 0: if t >= P<<shift, subtract P<<shift.
+    for (int shift = 255; shift >= 0; shift--) {
+        int lsh = shift >> 6;
+        int bsh = shift & 63;
+
+        uint64_t ps[8] = {};
+        for (int i = 0; i < 4; i++) {
+            if (i + lsh < 8)
+                ps[i + lsh] |= P_LIMBS[i] << bsh;
+            if (bsh > 0 && i + lsh + 1 < 8)
+                ps[i + lsh + 1] |= P_LIMBS[i] >> (64 - bsh);
+        }
+
+        bool geq = true;
+        for (int i = 7; i >= 0; i--) {
+            if (t[i] > ps[i]) break;
+            if (t[i] < ps[i]) { geq = false; break; }
+        }
+
+        if (geq) {
+            uint64_t borrow = 0;
+            for (int i = 0; i < 8; i++) {
+                unsigned __int128 rhs = (unsigned __int128)ps[i] + borrow;
+                borrow = ((unsigned __int128)t[i] < rhs) ? 1 : 0;
+                t[i] = (uint64_t)((unsigned __int128)t[i] - rhs);
+            }
+        }
+    }
+
+    uint256 res;
+    for (int i = 0; i < 4; i++) res.limbs[i] = t[i];
+    return res;
+}
+
+__device__ __forceinline__ uint256 mod_mul(uint256 a, uint256 b) {
+    uint64_t t[8] = {0};
+    for (int i = 0; i < 4; i++) {
+        uint64_t carry = 0;
+        for (int j = 0; j < 4; j++) {
+            unsigned __int128 prod = (unsigned __int128)a.limbs[i] * b.limbs[j] + t[i + j] + carry;
+            t[i + j] = (uint64_t)prod;
+            carry     = (uint64_t)(prod >> 64);
+        }
+        unsigned __int128 sum = (unsigned __int128)t[i + 4] + carry;
+        t[i + 4] = (uint64_t)sum;
+        if ((uint64_t)(sum >> 64) && (i + 5 < 8))
+            t[i + 5] += (uint64_t)(sum >> 64);
+    }
+    return naive_mod_512(t);
+}
+
+// In the naive path, values are NOT in Montgomery form.
+__device__ __forceinline__ uint256 to_montgomery(uint256 x)   { return x; }
+__device__ __forceinline__ uint256 from_montgomery(uint256 x) { return x; }
+
+#endif // USE_MONTGOMERY
+
+#endif // POSEIDON_H

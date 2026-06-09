@@ -39,7 +39,11 @@ void load_parameters(const std::string& filename) {
 }
 
 int main() {
+#ifdef USE_MONTGOMERY
     load_parameters("montgomery_constants.txt");
+#else
+    load_parameters("poseidon_params_n255_t3_alpha5_M128.txt");
+#endif
 
     std::ifstream input_file("../input.txt");
     if (!input_file) {
